@@ -33,21 +33,22 @@
       - python3-setuptools
     state: present
 
-- name: Définir le fuseau horaire
-  community.general.timezone:
-    name: "{{ timezone }}"
-  # Le module n'est pas indispensable au projet : si la collection
-  # community.general est absente, on retombe sur la méthode manuelle.
-  failed_when: false
-  register: timezone_module
+# Le module community.general.timezone s'appuie sur timedatectl, dont le
+# service systemd-timedated n'est pas fiable dans un nœud conteneurisé. La
+# méthode ci-dessous — les deux fichiers que lit réellement la glibc — est
+# déterministe et donne le même résultat.
+- name: Déclarer le fuseau horaire
+  ansible.builtin.copy:
+    dest: /etc/timezone
+    content: "{{ timezone }}\n"
+    mode: "0644"
 
-- name: Définir le fuseau horaire (méthode de repli)
+- name: Activer le fuseau horaire
   ansible.builtin.file:
     src: "/usr/share/zoneinfo/{{ timezone }}"
     dest: /etc/localtime
     state: link
     force: true
-  when: timezone_module is failed or timezone_module is skipped
 
 - name: Déclarer les deux nœuds dans /etc/hosts
   ansible.builtin.blockinfile:
@@ -63,10 +64,11 @@
     value: "{{ item.value }}"
     scope: system
   loop:
+    # safe.directory=* : sans cela Git refuse d'opérer sur un dépôt cloné par
+    # un autre utilisateur — exactement le cas d'un workspace Jenkins.
     - { name: "init.defaultBranch", value: "main" }
     - { name: "pull.rebase", value: "false" }
     - { name: "safe.directory", value: "*" }
-  failed_when: false
 
 - name: Créer le répertoire de métadonnées du projet
   ansible.builtin.file:

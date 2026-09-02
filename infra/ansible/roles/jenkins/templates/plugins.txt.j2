@@ -1,0 +1,12 @@
+# =============================================================================
+#  Greffons Jenkins requis par le pipeline du projet {{ project_name }}
+#  GENERE PAR ANSIBLE (role jenkins) depuis group_vars/all.yml.
+#  Ne pas editer a la main : modifier jenkins_plugins puis rejouer le playbook.
+#
+#  Aucune version n'est figee : plugin-installation-manager-tool choisit la
+#  version compatible avec le jenkins.war installe, et resout lui-meme les
+#  dependances transitives.
+# =============================================================================
+{% for plugin in jenkins_plugins %}
+{{ plugin }}
+{% endfor %}

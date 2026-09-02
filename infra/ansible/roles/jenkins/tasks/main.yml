@@ -3,8 +3,14 @@
 #  Rôle jenkins — serveur d'intégration continue.
 #
 #  Installe Java 17, Jenkins LTS, les greffons du pipeline, kubectl et Node.js
-#  (nécessaire aux tests de l'application sur l'agent), puis pré-configure
-#  l'instance pour éviter l'assistant de première utilisation.
+#  (nécessaires aux étapes du Jenkinsfile), puis configure l'instance de façon
+#  déclarative avec Jenkins Configuration as Code.
+#
+#  Ordre imposé : les greffons sont déposés AVANT le premier démarrage utile.
+#  Les installer via le CLI Jenkins serait circulaire — le CLI exige une
+#  authentification, or l'utilisateur admin est créé par JCasC, qui est
+#  lui-même un greffon. On utilise donc plugin-installation-manager-tool, qui
+#  résout les dépendances hors ligne à partir du fichier .war.
 # =============================================================================
 
 - name: Installer Java 17 (prérequis Jenkins)
@@ -32,7 +38,7 @@
     name: jenkins
     state: present
 
-# ------------------------------------------------- outillage requis par le pipeline
+# ------------------------------------- outillage requis par les étapes du pipeline
 - name: Installer Node.js 20 (dépôt NodeSource)
   block:
     - name: Installer la clé GPG NodeSource
@@ -50,11 +56,14 @@
         state: present
         update_cache: true
 
-    - name: Installer Node.js
+    - name: Installer Node.js 20
       ansible.builtin.apt:
         name: nodejs
         state: present
   rescue:
+    # Ubuntu 24.04 fournit Node.js 18 : plus ancien que le « engines » de
+    # l'application, mais suffisant pour Jest et npm ci. Mieux vaut un build
+    # qui passe qu'un playbook qui s'arrête.
     - name: Repli sur le paquet Node.js d'Ubuntu
       ansible.builtin.apt:
         name: nodejs
@@ -81,22 +90,122 @@
     state: present
 
 - name: Autoriser l'utilisateur jenkins à utiliser Docker
-  # Sans cela l'étape « docker build » du pipeline échoue sur un refus d'accès
-  # au socket /var/run/docker.sock.
+  # Sans cela l'étape « Build image Docker » échoue sur un refus d'accès au
+  # socket /var/run/docker.sock. L'appartenance au groupe n'est relue qu'au
+  # démarrage du process : d'où la notification de redémarrage.
   ansible.builtin.user:
     name: jenkins
     groups: docker
     append: true
   notify: Redemarrer Jenkins
 
-# ------------------------------------------------------------ pré-configuration
+# ============================================================ greffons Jenkins
+- name: Déclarer la liste des greffons
+  ansible.builtin.template:
+    src: plugins.txt.j2
+    dest: /etc/devops/jenkins-plugins.txt
+    mode: "0644"
+  register: plugins_list
+
+- name: Vérifier si les greffons déclarés sont déjà installés
+  # Marqueur d'idempotence : on ne réinstalle que si la liste a changé. Sans
+  # cela l'outil retélécharge une quarantaine de fichiers à chaque exécution.
+  ansible.builtin.stat:
+    path: /etc/devops/jenkins-plugins.installed
+  register: plugins_marker
+
+- name: Installer les greffons
+  when: plugins_list is changed or not plugins_marker.stat.exists
+  block:
+    - name: Récupérer la dernière version de plugin-installation-manager-tool
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/jenkinsci/plugin-installation-manager-tool/releases/latest
+        return_content: true
+      register: pim_release
+      retries: 3
+      delay: 5
+      until: pim_release.status | default(0) == 200
+
+    - name: Déterminer l'URL du binaire
+      ansible.builtin.set_fact:
+        pim_jar_url: >-
+          {{ pim_release.json.assets
+             | selectattr('name', 'search', '\.jar$')
+             | map(attribute='browser_download_url')
+             | first }}
+
+    - name: Télécharger l'outil d'installation des greffons
+      ansible.builtin.get_url:
+        url: "{{ pim_jar_url }}"
+        dest: /usr/local/lib/jenkins-plugin-manager.jar
+        mode: "0644"
+
+    - name: Créer le répertoire des greffons
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}/plugins"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0755"
+
+    - name: Télécharger les greffons et leurs dépendances
+      # --war : l'outil lit la version de Jenkins dans le .war et choisit des
+      # greffons compatibles, plutôt que les dernières versions publiées.
+      ansible.builtin.command:
+        argv:
+          - java
+          - -jar
+          - /usr/local/lib/jenkins-plugin-manager.jar
+          - --war
+          - /usr/share/java/jenkins.war
+          - --plugin-file
+          - /etc/devops/jenkins-plugins.txt
+          - --plugin-download-directory
+          - "{{ jenkins_home }}/plugins"
+          - --verbose
+      register: pim_install
+      changed_when: pim_install.rc == 0
+      # Le téléchargement de ~40 greffons prend plusieurs minutes.
+      async: 600
+      poll: 10
+
+    - name: Rétablir les droits sur les greffons
+      # L'outil tourne en root : sans cette étape Jenkins ne peut pas lire ses
+      # propres greffons et démarre avec une instance vide.
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}/plugins"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        recurse: true
+
+    - name: Écrire le marqueur d'installation
+      ansible.builtin.copy:
+        dest: /etc/devops/jenkins-plugins.installed
+        mode: "0644"
+        content: |
+          # Greffons installés par Ansible — ne pas modifier.
+          # Supprimer ce fichier force une réinstallation complète.
+          installed_at={{ ansible_date_time.iso8601 }}
+      notify: Redemarrer Jenkins
+
+  rescue:
+    - name: Signaler l'échec d'installation des greffons
+      ansible.builtin.debug:
+        msg: >-
+          AVERTISSEMENT : les greffons n'ont pas pu être installés
+          (réseau ou API GitHub indisponible). Jenkins démarrera sans pipeline
+          déclaratif. Reprendre avec :
+          ansible-playbook -i inventory/hosts.ini site.yml --tags jenkins
+
+# ==================================================== configuration déclarative
 - name: Créer le répertoire des surcharges systemd de Jenkins
   ansible.builtin.file:
     path: /etc/systemd/system/jenkins.service.d
     state: directory
     mode: "0755"
 
-- name: Fixer le port et les options JVM de Jenkins
+- name: Fixer le port, les options JVM et le chemin JCasC
   ansible.builtin.template:
     src: override.conf.j2
     dest: /etc/systemd/system/jenkins.service.d/override.conf
@@ -104,28 +213,22 @@
   notify: Redemarrer Jenkins
 
 - name: Désactiver l'assistant de première installation
-  # L'assistant bloque l'accès à l'interface derrière le mot de passe initial
-  # et empêche toute automatisation reproductible.
+  # L'assistant verrouille l'interface derrière un mot de passe généré et
+  # rendrait le provisionnement non reproductible.
   ansible.builtin.copy:
-    dest: "{{ jenkins_home }}/jenkins.install.InstallUtil.lastExecVersion"
+    dest: "{{ jenkins_home }}/{{ item }}"
     content: "2.999\n"
     owner: jenkins
     group: jenkins
     mode: "0644"
+  loop:
+    - jenkins.install.InstallUtil.lastExecVersion
+    - jenkins.install.UpgradeWizard.state
   notify: Redemarrer Jenkins
 
-- name: Marquer l'assistant comme déjà exécuté
-  ansible.builtin.copy:
-    dest: "{{ jenkins_home }}/jenkins.install.UpgradeWizard.state"
-    content: "2.999\n"
-    owner: jenkins
-    group: jenkins
-    mode: "0644"
-  notify: Redemarrer Jenkins
-
-- name: Déployer la configuration déclarative (JCasC)
-  # Configuration as Code : l'état de Jenkins est décrit dans un fichier
-  # versionnable plutôt que cliqué dans l'interface.
+- name: Déployer la configuration Jenkins as Code
+  # L'état de Jenkins (sécurité, exécuteurs, message d'accueil) est décrit dans
+  # un fichier versionnable au lieu d'être cliqué dans l'interface.
   ansible.builtin.template:
     src: jenkins.yaml.j2
     dest: "{{ jenkins_home }}/jenkins.yaml"
@@ -134,7 +237,7 @@
     mode: "0600"
   notify: Redemarrer Jenkins
 
-- name: Démarrer Jenkins
+- name: Activer et démarrer Jenkins
   ansible.builtin.systemd:
     name: jenkins
     enabled: true
@@ -144,66 +247,45 @@
 - name: Appliquer les changements en attente
   ansible.builtin.meta: flush_handlers
 
+# ------------------------------------------------------------- vérifications
 - name: Attendre que Jenkins réponde
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ jenkins_port }}/login"
     status_code: [200, 403]
   register: jenkins_up
-  retries: 40
+  retries: 60
   delay: 5
-  until: jenkins_up.status is defined and jenkins_up.status in [200, 403]
+  until: jenkins_up.status | default(0) in [200, 403]
 
-# ---------------------------------------------------------------- greffons
-- name: Télécharger le client CLI de Jenkins
-  ansible.builtin.get_url:
-    url: "http://127.0.0.1:{{ jenkins_port }}/jnlpJars/jenkins-cli.jar"
-    dest: /usr/local/lib/jenkins-cli.jar
-    mode: "0644"
-
-- name: Lister les greffons déjà installés
-  ansible.builtin.command: >-
-    java -jar /usr/local/lib/jenkins-cli.jar
-      -s http://127.0.0.1:{{ jenkins_port }}/
-      -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
-      list-plugins
-  register: installed_plugins
-  changed_when: false
-  failed_when: false
-  no_log: true
-
-- name: Installer les greffons du pipeline
-  ansible.builtin.command: >-
-    java -jar /usr/local/lib/jenkins-cli.jar
-      -s http://127.0.0.1:{{ jenkins_port }}/
-      -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
-      install-plugin {{ item }} -deploy
-  loop: "{{ jenkins_plugins }}"
-  when: >-
-    installed_plugins.rc == 0
-    and (item ~ ' ') not in (installed_plugins.stdout | default(''))
-  register: plugin_install
-  changed_when: plugin_install.rc == 0
-  failed_when: false
-  no_log: true
-
-- name: Redémarrer Jenkins pour activer les greffons
-  ansible.builtin.systemd:
-    name: jenkins
-    state: restarted
-  when: plugin_install is changed
-
-- name: Attendre le retour de Jenkins après redémarrage
+- name: Vérifier que JCasC a bien appliqué la sécurité
+  # Preuve que la configuration déclarative est active : l'API n'est joignable
+  # qu'avec les identifiants définis dans jenkins.yaml.
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ jenkins_port }}/login"
-    status_code: [200, 403]
-  register: jenkins_back
-  retries: 40
+    url: "http://127.0.0.1:{{ jenkins_port }}/api/json"
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: jcasc_check
+  retries: 12
   delay: 5
-  until: jenkins_back.status is defined and jenkins_back.status in [200, 403]
+  until: jcasc_check.status | default(0) == 200
+  failed_when: false
+
+- name: Compter les greffons effectivement chargés
+  ansible.builtin.find:
+    paths: "{{ jenkins_home }}/plugins"
+    patterns: "*.jpi,*.hpi"
+  register: plugins_found
 
 - name: Résumer l'état du serveur d'intégration continue
   ansible.builtin.debug:
     msg:
-      - "Jenkins accessible sur http://localhost:{{ jenkins_ui_port | default(jenkins_port) }}"
+      - "Jenkins : http://localhost:{{ jenkins_ui_port | default(jenkins_port) }}"
       - "Identifiants : {{ jenkins_admin_user }} / {{ jenkins_admin_password }}"
-      - "Prochaine étape : créer le job Pipeline pointant sur le dépôt Git (voir docs/RUNBOOK.md)"
+      - "Greffons installés : {{ plugins_found.matched }}"
+      - >-
+        {{ 'Configuration as Code active (API authentifiée joignable).'
+           if (jcasc_check.status | default(0)) == 200
+           else 'AVERTISSEMENT : JCasC non appliqué — vérifier journalctl -u jenkins' }}
+      - "Étape suivante : créer le job Pipeline (voir docs/RUNBOOK.md § 2)"

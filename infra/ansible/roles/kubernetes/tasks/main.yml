@@ -12,6 +12,10 @@
 #                           l'atteindre ;
 #    --apiserver-ips      : ajoute l'IP du nœud aux SAN du certificat, sinon
 #                           kubectl à distance échoue sur la vérification TLS.
+#
+#  On ne force PAS le cgroup-driver du kubelet : minikube l'aligne lui-même sur
+#  celui du runtime de son nœud. Le fixer à « systemd » alors que le Docker
+#  interne au nœud minikube utilise « cgroupfs » empêche le kubelet de démarrer.
 # =============================================================================
 
 # --------------------------------------------------------------------- kubectl
@@ -97,7 +101,6 @@
       --apiserver-port={{ kubernetes_apiserver_port }}
       --apiserver-ips={{ node_k8s_ip }}
       --apiserver-names=node-k8s
-      --extra-config=kubelet.cgroup-driver=systemd
       --wait=all
   environment:
     MINIKUBE_HOME: /root/.minikube

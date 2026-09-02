@@ -1,0 +1,51 @@
+{
+  "name": "todo-devops",
+  "version": "1.0.0",
+  "description": "Application web de gestion des taches (Trello minimaliste) - projet DevOps & Integration Continue",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "jest --runInBand",
+    "test:ci": "jest --runInBand --ci --coverage --reporters=default --reporters=jest-junit",
+    "migrate": "node src/migrate.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-junit": "^16.0.0",
+    "supertest": "^7.0.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "reports/coverage",
+    "coverageReporters": [
+      "text-summary",
+      "lcov",
+      "cobertura"
+    ],
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/server.js",
+      "!src/public/**"
+    ],
+    "coveragePathIgnorePatterns": [
+      "/node_modules/",
+      "src/public/"
+    ]
+  },
+  "jest-junit": {
+    "outputDirectory": "reports",
+    "outputName": "junit.xml",
+    "classNameTemplate": "{classname}",
+    "titleTemplate": "{title}",
+    "ancestorSeparator": " > "
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,53 @@
+# =============================================================================
+#  Stockage persistant de la base — livrable 5 : « le volume persistant pour
+#  la base de donnees ».
+#
+#  Le couple PV / PVC decouple l'infrastructure de l'application :
+#    - le PersistentVolume decrit le stockage REEL (ici un repertoire du noeud) ;
+#    - le PersistentVolumeClaim exprime le BESOIN du pod (taille, mode d'acces).
+#  Supprimer les pods, voire tout le Deployment, ne detruit pas les donnees.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: todo-postgres-pv
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: database
+spec:
+  capacity:
+    storage: 2Gi
+  # ReadWriteOnce : un seul noeud monte le volume en ecriture. C'est le mode
+  # adapte a une base relationnelle, qui ne supporte pas deux instances
+  # ecrivant sur le meme repertoire de donnees.
+  accessModes:
+    - ReadWriteOnce
+  # Retain : si le PVC est supprime, le PV et les donnees survivent et
+  # attendent une intervention explicite. « Delete » effacerait la base.
+  persistentVolumeReclaimPolicy: Retain
+  # storageClassName vide + selecteur sur le PVC = liaison statique explicite,
+  # pour que la reserve tombe bien sur CE volume et non sur un volume
+  # provisionne dynamiquement par la StorageClass par defaut de minikube.
+  storageClassName: manual
+  hostPath:
+    # /data est l'un des repertoires que minikube conserve entre deux
+    # redemarrages du noeud (`minikube stop && minikube start`).
+    path: /data/todo-pgdata
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: todo-postgres-pvc
+  namespace: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: todo-postgres-pv

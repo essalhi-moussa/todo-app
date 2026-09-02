@@ -1,0 +1,3 @@
+---
+# Aucun handler necessaire pour le role common : toutes ses taches sont
+# idempotentes et ne necessitent pas de redemarrage de service.

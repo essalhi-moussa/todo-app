@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Hook commit-msg — impose la convention Conventional Commits.
+#
+# Le cours Gestion de Configuration insiste sur des « messages de commit clairs
+# et descriptifs ». Un format impose rend l'historique lisible, permet de
+# generer un journal des modifications et de deduire la portee d'un changement.
+#
+# Format attendu :  <type>(<portee optionnelle>): <description>
+# Exemples        :  feat(app): ajouter le filtrage des taches terminees
+#                    fix(k8s): corriger le selecteur du Service NodePort
+#                    ci(jenkins): publier le rapport de couverture
+set -uo pipefail
+
+msg_file="$1"
+# On ignore les lignes de commentaire ajoutees par Git.
+subject=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -1)
+
+RED=$'\033[0;31m'; GRN=$'\033[0;32m'; NC=$'\033[0m'
+
+# Les commits generes par Git lui-meme (fusion, revert, fixup) echappent a la
+# regle : leur format est impose par Git.
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup!"*|"squash!"*)
+    exit 0 ;;
+esac
+
+types='build|chore|ci|docs|feat|fix|infra|perf|refactor|revert|style|test'
+pattern="^(${types})(\([a-z0-9._/-]+\))?!?: .{1,}$"
+
+if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+  cat >&2 <<MSG
+${RED}Message de commit refuse.${NC}
+
+  Recu   : ${subject}
+  Attendu: <type>(<portee>): <description>
+
+  Types autorises : ${types//|/, }
+
+  Exemples valides :
+    feat(app): ajouter la suppression d'une tache
+    fix(ansible): corriger le depot apt de Jenkins
+    docs(readme): detailler la procedure de deploiement
+    infra(terraform): publier le port de l'API Kubernetes
+
+MSG
+  exit 1
+fi
+
+# 72 caracteres : au-dela, git log et l'interface GitHub tronquent le sujet.
+if [ "${#subject}" -gt 72 ]; then
+  printf '%sMessage refuse : le sujet fait %d caracteres (maximum 72).%s\n' \
+    "$RED" "${#subject}" "$NC" >&2
+  printf 'Deplacer les details dans le corps du message, apres une ligne vide.\n' >&2
+  exit 1
+fi
+
+printf '%s✓%s message de commit conforme\n' "$GRN" "$NC"
+exit 0

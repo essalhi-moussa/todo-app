@@ -1,0 +1,23 @@
+# =============================================================================
+#  ConfigMap — parametres NON sensibles de l'application.
+#  Separer ConfigMap et Secret permet de versionner la configuration ordinaire
+#  sans jamais exposer d'identifiants.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: todo-app-config
+  namespace: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: app
+data:
+  NODE_ENV: production
+  PORT: "3000"
+  STORE_DRIVER: postgres
+  # Nom du Service PostgreSQL : resolu par le DNS interne du cluster
+  # (CoreDNS) en todo-postgres.todo-app.svc.cluster.local.
+  DB_HOST: todo-postgres
+  DB_PORT: "5432"
+  DB_POOL_MAX: "10"
+  DB_CONNECT_TIMEOUT_MS: "5000"

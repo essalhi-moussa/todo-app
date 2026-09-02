@@ -1,0 +1,4 @@
+---
+# Le cluster minikube n'est pas gere par un service systemd classique :
+# les changements de configuration passent par `minikube start`, deja
+# idempotent dans tasks/main.yml.

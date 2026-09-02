@@ -1,0 +1,154 @@
+---
+# =============================================================================
+#  Playbook principal — configuration des nœuds provisionnés par Terraform.
+#
+#  Terraform a créé les machines ; Ansible installe et configure le logiciel.
+#  Approche impérative, agentless, push : le contrôleur (WSL) pousse la
+#  configuration par SSH en s'appuyant sur inventory/hosts.ini.
+#
+#  Usage :
+#     ansible-playbook -i inventory/hosts.ini site.yml
+#     ansible-playbook -i inventory/hosts.ini site.yml --tags jenkins
+#     ansible-playbook -i inventory/hosts.ini site.yml --check --diff
+# =============================================================================
+
+# --------------------------------------------------------------------- étape 0
+- name: Attendre que les nœuds soient joignables en SSH
+  hosts: nodes
+  gather_facts: false
+  tags: [always]
+
+  tasks:
+    - name: Attendre l'ouverture du port SSH
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 120
+
+    - name: Collecter les faits une fois la connexion établie
+      ansible.builtin.setup:
+
+    - name: Vérifier que systemd pilote bien le nœud
+      ansible.builtin.command: systemctl is-system-running --wait
+      register: systemd_state
+      changed_when: false
+      # « degraded » est acceptable dans un conteneur : certaines unités liées
+      # au matériel restent en échec sans conséquence pour le projet.
+      failed_when: systemd_state.stdout not in ['running', 'degraded', 'starting']
+
+# --------------------------------------------------------------------- étape 1
+- name: Socle commun aux deux nœuds
+  hosts: nodes
+  become: true
+  tags: [common]
+
+  roles:
+    - role: common
+    - role: docker
+
+# --------------------------------------------------------------------- étape 2
+- name: Nœud d'intégration continue
+  hosts: jenkins
+  become: true
+  tags: [jenkins, ci]
+
+  roles:
+    - role: jenkins
+
+# --------------------------------------------------------------------- étape 3
+- name: Nœud Kubernetes, base de données et serveur web
+  hosts: kubernetes
+  become: true
+  tags: [kubernetes, database, web]
+
+  roles:
+    - role: kubernetes
+      tags: [kubernetes]
+    - role: postgresql
+      tags: [database]
+    - role: nginx
+      tags: [web]
+
+# --------------------------------------------------------------------- étape 4
+# Le nœud Jenkins doit pouvoir parler à l'API server du cluster. On récupère le
+# kubeconfig distant produit par le rôle kubernetes et on le dépose dans le
+# HOME de Jenkins : le pipeline peut alors faire « kubectl apply » directement.
+- name: Distribuer l'accès au cluster au nœud Jenkins
+  hosts: jenkins
+  become: true
+  tags: [kubeconfig, ci]
+
+  tasks:
+    - name: Vérifier que le kubeconfig distant a été généré sur le contrôleur
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_fetch_path }}"
+      register: kubeconfig_local
+      delegate_to: localhost
+      become: false
+      vars:
+        kubeconfig_fetch_path: "/tmp/{{ project_name }}-kubeconfig"
+
+    - name: Créer le répertoire .kube de Jenkins
+      ansible.builtin.file:
+        path: "{{ jenkins_home }}/.kube"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0700"
+      when: kubeconfig_local.stat.exists
+
+    - name: Installer le kubeconfig pour l'utilisateur jenkins
+      ansible.builtin.copy:
+        src: "/tmp/{{ project_name }}-kubeconfig"
+        dest: "{{ jenkins_home }}/.kube/config"
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+      when: kubeconfig_local.stat.exists
+      notify: Redemarrer Jenkins
+
+    - name: Installer le kubeconfig pour root (diagnostic manuel)
+      ansible.builtin.copy:
+        src: "/tmp/{{ project_name }}-kubeconfig"
+        dest: /root/.kube/config
+        mode: "0600"
+      when: kubeconfig_local.stat.exists
+
+    - name: Vérifier que le nœud Jenkins atteint bien le cluster
+      ansible.builtin.command: kubectl --request-timeout=15s get nodes
+      become_user: jenkins
+      environment:
+        KUBECONFIG: "{{ jenkins_home }}/.kube/config"
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Afficher le résultat du test d'accès au cluster
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Cluster joignable depuis node-jenkins.'
+             if kubectl_check.rc == 0
+             else 'Cluster NON joignable (rc=' ~ kubectl_check.rc ~ '). Détail : '
+                  ~ (kubectl_check.stderr | default('') | truncate(300)) }}
+
+  handlers:
+    - name: Redemarrer Jenkins
+      ansible.builtin.systemd:
+        name: jenkins
+        state: restarted
+
+# --------------------------------------------------------------------- étape 5
+- name: Récapitulatif de l'infrastructure configurée
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [always, summary]
+
+  tasks:
+    - name: Afficher les points d'accès
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins        : http://localhost:{{ jenkins_port }}  (admin / {{ jenkins_admin_password }})"
+          - "Application    : http://localhost:8081  (NGINX -> NodePort {{ app_nodeport }})"
+          - "API Kubernetes : https://{{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}"
+          - "PostgreSQL     : localhost:5432  (base d'intégration {{ postgres_db }})"
+          - "Étape suivante : déployer l'application -> kubectl apply -k k8s/"

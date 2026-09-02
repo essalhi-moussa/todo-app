@@ -1,0 +1,169 @@
+---
+# =============================================================================
+#  Rôle kubernetes — installe kubectl et démarre un cluster minikube.
+#
+#  Le nœud tourne en mode privilégié et dispose de son propre démon Docker :
+#  minikube utilise donc son driver `docker` et crée son nœud comme conteneur
+#  imbriqué. Trois options sont indispensables ici :
+#
+#    --force              : minikube refuse par défaut de tourner en root ;
+#    --listen-address=0.0.0.0 : sans cela l'API server n'écoute que sur la
+#                           boucle locale du nœud et Jenkins ne peut pas
+#                           l'atteindre ;
+#    --apiserver-ips      : ajoute l'IP du nœud aux SAN du certificat, sinon
+#                           kubectl à distance échoue sur la vérification TLS.
+# =============================================================================
+
+# --------------------------------------------------------------------- kubectl
+- name: Installer la clé GPG du dépôt Kubernetes
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_minor }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes.asc
+    mode: "0644"
+
+- name: Déclarer le dépôt Kubernetes
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/kubernetes.asc]
+      https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_minor }}/deb/ /
+    filename: kubernetes
+    state: present
+    update_cache: true
+
+- name: Installer kubectl et les dépendances du kubelet
+  ansible.builtin.apt:
+    name:
+      - kubectl
+      - conntrack # exigé par minikube quel que soit le driver
+      - socat
+      - ethtool
+    state: present
+
+# -------------------------------------------------------------------- minikube
+- name: Vérifier si minikube est déjà installé
+  ansible.builtin.stat:
+    path: /usr/local/bin/minikube
+  register: minikube_binary
+
+- name: Télécharger le binaire minikube
+  ansible.builtin.get_url:
+    url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+    dest: /usr/local/bin/minikube
+    mode: "0755"
+  when: not minikube_binary.stat.exists
+
+- name: Charger les modules noyau requis par le réseau Kubernetes
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+  # Sous WSL2 ces modules sont compilés dans le noyau : le chargement échoue
+  # alors qu'ils sont déjà disponibles. On n'interrompt donc pas le playbook.
+  failed_when: false
+
+- name: Activer le routage et le bridge netfilter
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { key: net.bridge.bridge-nf-call-iptables, value: "1" }
+    - { key: net.ipv4.ip_forward, value: "1" }
+  failed_when: false
+
+# --------------------------------------------------------- démarrage du cluster
+- name: Vérifier l'état du cluster minikube
+  ansible.builtin.command: minikube status --format '{% raw %}{{.Host}}{% endraw %}'
+  environment:
+    MINIKUBE_HOME: /root/.minikube
+    CHANGE_MINIKUBE_NONE_USER: "true"
+  register: minikube_status
+  changed_when: false
+  failed_when: false
+
+- name: Démarrer le cluster minikube
+  ansible.builtin.command: >-
+    minikube start
+      --driver=docker
+      --force
+      --container-runtime=docker
+      --cpus={{ minikube_cpus }}
+      --memory={{ minikube_memory_mb }}
+      --listen-address=0.0.0.0
+      --apiserver-port={{ kubernetes_apiserver_port }}
+      --apiserver-ips={{ node_k8s_ip }}
+      --apiserver-names=node-k8s
+      --extra-config=kubelet.cgroup-driver=systemd
+      --wait=all
+  environment:
+    MINIKUBE_HOME: /root/.minikube
+    MINIKUBE_IN_STYLE: "false"
+  register: minikube_start
+  when: minikube_status.stdout != "Running"
+  changed_when: minikube_start.rc == 0
+  # Le premier démarrage télécharge l'image kicbase (~1 Go) puis les images du
+  # plan de contrôle : 10 minutes de marge sont nécessaires.
+  async: 900
+  poll: 15
+
+- name: Attendre que tous les nœuds du cluster soient Ready
+  ansible.builtin.command: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: nodes_ready
+  changed_when: false
+  retries: 3
+  delay: 10
+  until: nodes_ready.rc == 0
+
+- name: Activer les modules complémentaires utiles
+  ansible.builtin.command: "minikube addons enable {{ item }}"
+  environment:
+    MINIKUBE_HOME: /root/.minikube
+  loop:
+    - default-storageclass
+    - storage-provisioner
+    - metrics-server
+  register: addon_result
+  changed_when: "'enabled' in addon_result.stdout | lower"
+  failed_when: false
+
+# ------------------------------------------------- kubeconfig pour l'extérieur
+- name: Récupérer l'adresse interne du nœud minikube
+  ansible.builtin.command: minikube ip
+  environment:
+    MINIKUBE_HOME: /root/.minikube
+  register: minikube_ip
+  changed_when: false
+
+- name: Générer un kubeconfig utilisable depuis un autre nœud
+  # Le kubeconfig local pointe sur 127.0.0.1 : inexploitable depuis Jenkins.
+  # On le recopie en remplaçant l'adresse du serveur par l'IP du nœud, et on
+  # embarque les certificats en base64 pour qu'il soit autoportant.
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      export KUBECONFIG=/root/.kube/config
+      kubectl config view --raw --flatten > /etc/devops/kubeconfig-remote
+      sed -i "s|server: https://[^ ]*|server: https://{{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}|" \
+        /etc/devops/kubeconfig-remote
+      chmod 0600 /etc/devops/kubeconfig-remote
+  changed_when: true
+
+- name: Rapatrier le kubeconfig distant sur le contrôleur Ansible
+  ansible.builtin.fetch:
+    src: /etc/devops/kubeconfig-remote
+    dest: "/tmp/{{ project_name }}-kubeconfig"
+    flat: true
+
+- name: Résumer l'état du cluster
+  ansible.builtin.debug:
+    msg:
+      - "minikube démarré — nœud interne {{ minikube_ip.stdout }}"
+      - "API server accessible sur https://{{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}"
+      - "kubeconfig distant : /etc/devops/kubeconfig-remote"

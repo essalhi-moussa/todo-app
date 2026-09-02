@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# Hook pre-push — derniere barriere avant de publier sur le depot distant.
+#
+# Applique la bonne pratique du cours CI : « lancer des builds sur le poste de
+# travail » et « eviter de recuperer du mauvais code ». Un push qui casse la
+# branche partagee bloque toute l'equipe ; le meme echec detecte ici ne coute
+# qu'a son auteur.
+#
+# Contournement ponctuel : git push --no-verify
+set -uo pipefail
+
+RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[0;33m'; NC=$'\033[0m'
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root" || exit 1
+
+printf '── Verifications pre-push ───────────────────────────────────\n'
+
+# --------------------------------------------- protection des branches partagees
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$current_branch" = "main" ]; then
+  printf '%s!%s push direct sur main.\n' "$YEL" "$NC"
+  printf '   Le flux du projet passe par dev puis une pull request (docs/PULL-REQUEST.md).\n'
+fi
+
+# ------------------------------------------------------ suite de tests complete
+if [ ! -d app/node_modules ]; then
+  printf '%s!%s app/node_modules absent — tests ignores.\n' "$YEL" "$NC"
+  printf '   Installer les dependances : (cd app && npm ci)\n'
+  exit 0
+fi
+
+printf '   execution de la suite de tests...\n'
+if ( cd app && STORE_DRIVER=memory npm test --silent >/tmp/pre-push-tests.log 2>&1 ); then
+  passed=$(grep -oE 'Tests:.*' /tmp/pre-push-tests.log | tail -1)
+  printf '%s✓%s tests au vert — %s\n' "$GRN" "$NC" "${passed:-OK}"
+else
+  printf '%s✗%s la suite de tests echoue :\n' "$RED" "$NC"
+  tail -30 /tmp/pre-push-tests.log
+  printf '\n%sPush refuse.%s Corriger les tests, ou forcer avec : git push --no-verify\n' \
+    "$RED" "$NC"
+  exit 1
+fi
+
+printf '─────────────────────────────────────────────────────────────\n'
+exit 0

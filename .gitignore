@@ -1,0 +1,78 @@
+# =============================================================================
+#  Fichiers exclus du versionnement.
+#  Regle directrice : tout ce qui est genere, local ou secret reste hors du depot.
+# =============================================================================
+
+# ---------------------------------------------------------------- Node.js
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.npm/
+*.tsbuildinfo
+
+# ------------------------------------------------------ artefacts de build
+app/reports/
+coverage/
+*.tgz
+dist/
+build/
+
+# ---------------------------------------------------------------- secrets
+# Les identifiants ne doivent JAMAIS etre versionnes : seuls les modeles
+# .example le sont (voir app/.env.example, k8s/10-secret.yaml).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/*.pub
+id_rsa*
+id_ed25519*
+kubeconfig
+kubeconfig-*
+*-credentials.yaml
+
+# --------------------------------------------------------------- Terraform
+# L'etat contient l'inventaire complet de l'infrastructure et parfois des
+# valeurs sensibles : il appartient a un backend distant, pas au depot.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# Les surcharges locales restent locales ; terraform.tfvars.example est versionne.
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+.terraform.lock.hcl.bak
+
+# ----------------------------------------------------------------- Ansible
+# hosts.ini est GENERE par terraform apply : versionner le modele suffit
+# (infra/terraform/templates/hosts.ini.tftpl + inventory/hosts.ini.example).
+infra/ansible/inventory/hosts.ini
+*.retry
+.ansible/
+ansible-facts-*/
+/tmp/ansible-facts-*
+
+# ------------------------------------------------------------------ Docker
+.dockerignore.local
+
+# ------------------------------------------------- environnements de dev
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------- systemes hote
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ------------------------------------------------------------------- logs
+logs/
+*.log

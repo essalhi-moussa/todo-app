@@ -1,0 +1,144 @@
+---
+# =============================================================================
+#  Rôle postgresql — base de données d'INTÉGRATION hébergée sur le nœud.
+#
+#  Livrable 1 du sujet : « Configure une base de données (ex. PostgreSQL) ».
+#  Cette instance sert d'environnement d'intégration au pipeline (tests
+#  d'intégration contre une vraie base). La base de PRODUCTION, elle, vit dans
+#  le cluster Kubernetes avec son PersistentVolume — voir k8s/.
+#
+#  Les données sont sur le volume Docker monté par Terraform sur
+#  /var/lib/postgresql : elles survivent à un `terraform destroy` des nœuds.
+# =============================================================================
+
+- name: Installer PostgreSQL {{ postgres_version }}
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ postgres_version }}"
+      - "postgresql-client-{{ postgres_version }}"
+      - postgresql-common
+    state: present
+
+- name: S'assurer que le répertoire de données appartient à postgres
+  # Terraform monte un volume vierge sur /var/lib/postgresql ; sans ce
+  # correctif, initdb échouerait sur un répertoire appartenant à root.
+  ansible.builtin.file:
+    path: /var/lib/postgresql
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0755"
+
+- name: Vérifier l'existence du cluster
+  ansible.builtin.stat:
+    path: "/var/lib/postgresql/{{ postgres_version }}/main/PG_VERSION"
+  register: pg_cluster
+
+- name: Créer le cluster s'il est absent
+  ansible.builtin.command: >-
+    pg_createcluster {{ postgres_version }} main --start
+  when: not pg_cluster.stat.exists
+  changed_when: true
+
+- name: Déposer la configuration du projet
+  ansible.builtin.template:
+    src: 10-project.conf.j2
+    dest: "/etc/postgresql/{{ postgres_version }}/main/conf.d/10-project.conf"
+    owner: postgres
+    group: postgres
+    mode: "0644"
+  notify: Redemarrer PostgreSQL
+
+- name: Autoriser les connexions depuis le réseau du projet
+  ansible.builtin.blockinfile:
+    path: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+    marker: "# {mark} ANSIBLE — accès projet {{ project_name }}"
+    block: |
+      {% for cidr in postgres_allowed_cidrs %}
+      host    {{ postgres_db }}    {{ postgres_user }}    {{ cidr }}    scram-sha-256
+      {% endfor %}
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Redemarrer PostgreSQL
+
+- name: Activer et démarrer PostgreSQL
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: true
+    state: started
+
+- name: Appliquer les modifications de configuration en attente
+  ansible.builtin.meta: flush_handlers
+
+- name: Attendre que PostgreSQL accepte les connexions
+  ansible.builtin.command: pg_isready -q
+  become_user: postgres
+  register: pg_ready
+  retries: 20
+  delay: 3
+  until: pg_ready.rc == 0
+  changed_when: false
+
+# ------------------------------------------------------- rôle et base projet
+# On utilise psql plutôt que les modules community.postgresql pour éviter
+# d'imposer l'installation d'une collection Ansible supplémentaire. Le SQL
+# ci-dessous est idempotent : rejouer le playbook ne provoque aucune erreur.
+- name: Créer le rôle applicatif
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ postgres_user }}'" | grep -q 1 \
+        && psql -c "ALTER ROLE \"{{ postgres_user }}\" WITH LOGIN PASSWORD '{{ postgres_password }}'" \
+        || psql -c "CREATE ROLE \"{{ postgres_user }}\" WITH LOGIN PASSWORD '{{ postgres_password }}'"
+  become_user: postgres
+  register: pg_role
+  changed_when: "'CREATE ROLE' in pg_role.stdout"
+  no_log: true # le mot de passe apparaîtrait autrement dans la sortie
+
+- name: Créer la base de données
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      if psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ postgres_db }}'" | grep -q 1; then
+        echo "ALREADY_EXISTS"
+      else
+        createdb -O "{{ postgres_user }}" "{{ postgres_db }}"
+        echo "CREATED"
+      fi
+  become_user: postgres
+  register: pg_db
+  changed_when: "'CREATED' in pg_db.stdout"
+
+- name: Copier le script de migration
+  # Source unique de verite : le meme fichier que celui applique par
+  # l'application au demarrage (app/migrations/001_init.sql). Aucune copie
+  # dans le role, donc aucun risque de divergence de schema.
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../app/migrations/001_init.sql"
+    dest: /tmp/001_init.sql
+    owner: postgres
+    group: postgres
+    mode: "0644"
+
+- name: Appliquer le schéma applicatif
+  ansible.builtin.command: >-
+    psql -d {{ postgres_db }} -v ON_ERROR_STOP=1 -f /tmp/001_init.sql
+  become_user: postgres
+  register: pg_migrate
+  changed_when: "'CREATE TABLE' in pg_migrate.stdout or 'CREATE INDEX' in pg_migrate.stdout"
+
+- name: Vérifier que la table tasks est bien présente
+  ansible.builtin.command: >-
+    psql -d {{ postgres_db }} -tAc "SELECT count(*) FROM tasks"
+  become_user: postgres
+  register: pg_check
+  changed_when: false
+
+- name: Résumer l'état de la base d'intégration
+  ansible.builtin.debug:
+    msg: >-
+      PostgreSQL {{ postgres_version }} prêt — base « {{ postgres_db }} »,
+      rôle « {{ postgres_user }} », {{ pg_check.stdout | trim }} tâche(s) en base.

@@ -1,0 +1,79 @@
+---
+# =============================================================================
+#  Variables partagées par tous les nœuds.
+#  Aucun secret réel ici : les mots de passe de démonstration sont surchargés
+#  en production par le Secret Kubernetes (k8s/secret.yaml) et par les
+#  identifiants Jenkins.
+# =============================================================================
+
+project_name: todo-devops
+timezone: Africa/Casablanca
+
+# ---------------------------------------------------------------- topologie
+# Ces adresses correspondent au réseau déclaré dans infra/terraform/variables.tf.
+node_jenkins_ip: 172.28.0.10
+node_k8s_ip: 172.28.0.11
+
+# ------------------------------------------------------------------- Docker
+docker_apt_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# --------------------------------------------------------------- Kubernetes
+kubernetes_minor: "1.31"
+minikube_cpus: 2
+minikube_memory_mb: 3072
+# Port fixe de l'API server : sans cela minikube choisit un port aléatoire et
+# le kubeconfig distribué à Jenkins deviendrait invalide à chaque redémarrage.
+kubernetes_apiserver_port: 8443
+app_nodeport: 30080
+
+# ------------------------------------------------------------------- Jenkins
+jenkins_port: 8080
+jenkins_home: /var/lib/jenkins
+jenkins_admin_user: admin
+# Mot de passe de laboratoire. En contexte réel : Jenkins Configuration as Code
+# alimenté par un secret externe (Vault, Kubernetes Secret…).
+jenkins_admin_password: admin123
+jenkins_plugins:
+  - workflow-aggregator      # Pipeline (Jenkinsfile déclaratif)
+  - git
+  - github
+  - github-branch-source
+  - docker-workflow
+  - kubernetes-cli           # withKubeConfig
+  - credentials-binding
+  - junit                    # rapports de tests (cf. TP3)
+  - htmlpublisher
+  - cobertura
+  - timestamper
+  - ws-cleanup
+  - build-timeout
+  - pipeline-stage-view
+  - configuration-as-code
+
+# ---------------------------------------------------------------- PostgreSQL
+# Base d'INTÉGRATION, hébergée sur le nœud (livrable 1 : « configure une base
+# de données »). La base de PRODUCTION vit dans le cluster Kubernetes avec son
+# PersistentVolume (livrable 5).
+postgres_version: 16
+postgres_db: tododb
+postgres_user: todo
+postgres_password: integration-only-not-a-secret
+postgres_listen_addresses: "*"
+postgres_allowed_cidrs:
+  - 127.0.0.1/32
+  - 172.28.0.0/24
+
+# --------------------------------------------------------------------- NGINX
+# NGINX sert de point d'entrée HTTP unique : il relaie le NodePort du cluster,
+# ce qui évite d'exposer directement les ports 30000-32767 de Kubernetes.
+nginx_server_name: _
+nginx_upstream_port: "{{ app_nodeport }}"
+
+# ------------------------------------------------------------- application
+app_container_port: 3000
+app_namespace: todo-app

@@ -1,0 +1,35 @@
+# =============================================================================
+#  Regroupe tous les manifestes du projet en une seule unite de deploiement :
+#      kubectl apply -k k8s/
+#
+#  L'ordre de la liste est respecte par kubectl, ce qui garantit que le
+#  Namespace, le Secret et le ConfigMap existent avant les charges de travail
+#  qui en dependent.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-namespace.yaml
+  - 10-secret.yaml
+  - 20-configmap.yaml
+  - 30-postgres-storage.yaml
+  - 32-postgres-deployment.yaml
+  - 40-app-deployment.yaml
+  - 41-app-service.yaml
+
+# Etiquettes appliquees a toutes les ressources : permettent de retrouver ou
+# de supprimer d'un coup tout ce qui appartient au projet.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: todo-devops
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+
+# Le pipeline Jenkins remplace ce nom d'image par le tag qu'il vient de
+# publier (`kubectl set image`), ou l'operateur peut le faire ici :
+#     kustomize edit set image docker.io/library/todo-devops=<user>/todo-devops:<tag>
+images:
+  - name: docker.io/library/todo-devops
+    newName: docker.io/library/todo-devops
+    newTag: latest

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Application non deployee</title>
+  <style>
+    body { margin:0; min-height:100vh; display:grid; place-items:center;
+           background:#f4f5f7; color:#172b4d;
+           font:15px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+    .card { max-width:520px; padding:2rem 2.2rem; background:#fff; border-radius:10px;
+            box-shadow:0 1px 3px rgba(9,30,66,.25); }
+    h1 { margin:0 0 .6rem; font-size:1.25rem; }
+    p { margin:.5rem 0; color:#42526e; }
+    code { background:#f4f5f7; border-radius:4px; padding:.15rem .4rem;
+           font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.9em; }
+    .meta { margin-top:1.2rem; padding-top:1rem; border-top:1px solid #dfe1e6;
+            font-size:.8rem; color:#6b778c; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>NGINX repond, l'application n'est pas encore deployee</h1>
+    <p>
+      Le serveur web du noeud <strong>{{ inventory_hostname }}</strong> fonctionne,
+      mais aucun pod ne repond derriere le NodePort
+      <code>{{ app_nodeport }}</code> du cluster.
+    </p>
+    <p>Deploiement de l'application :</p>
+    <p><code>kubectl apply -k k8s/</code> &nbsp;ou&nbsp; lancer le pipeline Jenkins.</p>
+    <div class="meta">
+      Projet {{ project_name }} &middot; reverse proxy vers
+      {{ nginx_upstream_host }}:{{ app_nodeport }}
+    </div>
+  </div>
+</body>
+</html>

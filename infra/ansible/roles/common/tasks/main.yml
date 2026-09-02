@@ -1,0 +1,87 @@
+---
+# =============================================================================
+#  Rôle common — socle appliqué aux deux nœuds.
+#  Paquets de base, Git, fuseau horaire, résolution de noms inter-nœuds.
+# =============================================================================
+
+- name: Rafraîchir le cache apt (au plus une fois par heure)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Installer les paquets de base
+  ansible.builtin.apt:
+    name:
+      - git
+      - curl
+      - wget
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - apt-transport-https
+      - software-properties-common
+      - unzip
+      - jq
+      - rsync
+      - net-tools
+      - iproute2
+      - dnsutils
+      - htop
+      - vim
+      - acl # requis par become_user vers un compte non privilégié
+      - python3-pip
+      - python3-setuptools
+    state: present
+
+- name: Définir le fuseau horaire
+  community.general.timezone:
+    name: "{{ timezone }}"
+  # Le module n'est pas indispensable au projet : si la collection
+  # community.general est absente, on retombe sur la méthode manuelle.
+  failed_when: false
+  register: timezone_module
+
+- name: Définir le fuseau horaire (méthode de repli)
+  ansible.builtin.file:
+    src: "/usr/share/zoneinfo/{{ timezone }}"
+    dest: /etc/localtime
+    state: link
+    force: true
+  when: timezone_module is failed or timezone_module is skipped
+
+- name: Déclarer les deux nœuds dans /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE — nœuds du projet {{ project_name }}"
+    block: |
+      {{ node_jenkins_ip }} node-jenkins
+      {{ node_k8s_ip }} node-k8s
+
+- name: Configurer Git au niveau système
+  community.general.git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: system
+  loop:
+    - { name: "init.defaultBranch", value: "main" }
+    - { name: "pull.rebase", value: "false" }
+    - { name: "safe.directory", value: "*" }
+  failed_when: false
+
+- name: Créer le répertoire de métadonnées du projet
+  ansible.builtin.file:
+    path: /etc/devops
+    state: directory
+    mode: "0755"
+
+- name: Écrire le marqueur de provisionnement
+  ansible.builtin.copy:
+    dest: /etc/devops/provisioned
+    mode: "0644"
+    content: |
+      # Nœud configuré par Ansible — ne pas modifier à la main.
+      project={{ project_name }}
+      role={{ 'ci' if inventory_hostname in groups['jenkins'] else 'kubernetes' }}
+      hostname={{ inventory_hostname }}
+      ip={{ ansible_host }}
+      provisioned_at={{ ansible_date_time.iso8601 | default('unknown') }}

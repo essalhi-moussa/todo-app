@@ -1,0 +1,165 @@
+# =============================================================================
+#  Deploiement de l'application — livrable 5 : « le deploiement de
+#  l'application ».
+#
+#  L'image est remplacee a chaque build par le pipeline Jenkins :
+#      kubectl -n todo-app set image deployment/todo-app todo-app=<image>:<tag>
+#  Le tag « latest » ci-dessous n'est qu'une valeur de depart permettant
+#  d'appliquer les manifestes seuls, sans Jenkins.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-app
+  namespace: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: app
+  annotations:
+    kubernetes.io/change-cause: "Deploiement initial"
+spec:
+  # 2 replicas : demontre la repartition de charge du Service et permet une
+  # mise a jour sans interruption de service.
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 garantit qu'aucune requete n'est perdue pendant une
+      # mise a jour : le nouveau pod doit etre Ready avant l'arret de l'ancien.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: todo-devops
+      app.kubernetes.io/component: app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: todo-devops
+        app.kubernetes.io/component: app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+
+      # Attend que PostgreSQL accepte les connexions avant de demarrer
+      # l'application : evite une salve de redemarrages au premier deploiement.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -q; do
+                echo "en attente de PostgreSQL sur $DB_HOST:$DB_PORT..."
+                sleep 2
+              done
+              echo "PostgreSQL est pret"
+          envFrom:
+            - configMapRef:
+                name: todo-app-config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
+      containers:
+        - name: todo-app
+          image: docker.io/library/todo-devops:latest
+          # Always : le pipeline republie le tag « latest » a chaque build ;
+          # sans cela le kubelet reutiliserait l'image deja en cache.
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 3000
+
+          # Configuration ordinaire depuis le ConfigMap, identifiants depuis
+          # le Secret : aucune valeur sensible dans ce manifeste.
+          envFrom:
+            - configMapRef:
+                name: todo-app-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_NAME
+            # Expose le nom du pod dans l'interface web : rend visible la
+            # repartition de charge entre les replicas.
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          # /health n'interroge pas la base : une panne PostgreSQL ne doit pas
+          # provoquer un redemarrage en boucle des pods applicatifs.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # /ready teste la base : un pod dont la base est injoignable est
+          # simplement retire du Service, sans etre tue.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Laisse jusqu'a 60 s au premier demarrage (migration du schema)
+          # sans declencher la liveness.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # readOnlyRootFilesystem impose un volume inscriptible pour /tmp.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Laisse le temps aux connexions en cours de se terminer sur SIGTERM
+      # (arret propre implemente dans src/server.js).
+      terminationGracePeriodSeconds: 30

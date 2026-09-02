@@ -1,0 +1,4 @@
+---
+# Valeurs par defaut du role docker.
+# Les variables reellement utilisees sont centralisees dans
+# infra/ansible/group_vars/all.yml pour garder une seule source de verite.

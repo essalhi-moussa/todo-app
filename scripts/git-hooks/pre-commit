@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#
+# Hook pre-commit — barriere qualite locale.
+#
+# Applique le principe du cours Integration Continue : « des commits maitrises
+# (hook, passage des outils locaux) » et « commiter du code bon ». Detecter une
+# erreur ici coute quelques secondes ; la detecter dans Jenkins coute un build.
+#
+# Verifications :
+#   1. aucun secret evident dans les modifications indexees
+#   2. aucun fichier volumineux ajoute par megarde
+#   3. aucun marqueur de conflit de fusion oublie
+#   4. les fichiers Terraform sont correctement formates
+#   5. les fichiers YAML sont syntaxiquement valides
+#
+# Contournement ponctuel : git commit --no-verify
+set -uo pipefail
+
+RED=$'\033[0;31m'; YEL=$'\033[0;33m'; GRN=$'\033[0;32m'; NC=$'\033[0m'
+errors=0
+
+say()  { printf '%s\n' "$*"; }
+fail() { printf '%s✗%s %s\n' "$RED" "$NC" "$*"; errors=$((errors + 1)); }
+warn() { printf '%s!%s %s\n' "$YEL" "$NC" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$NC" "$*"; }
+
+say "── Verifications pre-commit ─────────────────────────────────"
+
+# Fichiers indexes, hors suppressions.
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && { ok "aucun fichier indexe"; exit 0; }
+
+# ------------------------------------------------------------------ 1. secrets
+# Motifs volontairement etroits pour eviter les faux positifs sur les fichiers
+# d'exemple, qui sont exclus explicitement.
+secret_patterns=(
+  'AKIA[0-9A-Z]{16}'                       # cle d'acces AWS
+  'BEGIN [A-Z ]*PRIVATE KEY'               # cle privee PEM
+  'ghp_[A-Za-z0-9]{36}'                    # jeton GitHub
+  'dckr_pat_[A-Za-z0-9_-]{20,}'            # jeton DockerHub
+  'xox[baprs]-[A-Za-z0-9-]{10,}'           # jeton Slack
+)
+secret_found=0
+for file in $staged; do
+  case "$file" in
+    *.example|*.md|*/git-hooks/*|*.lock|package-lock.json) continue ;;
+  esac
+  [ -f "$file" ] || continue
+  for pattern in "${secret_patterns[@]}"; do
+    if git show ":$file" 2>/dev/null | grep -qE "$pattern"; then
+      fail "secret potentiel dans $file (motif: $pattern)"
+      secret_found=1
+    fi
+  done
+done
+[ "$secret_found" -eq 0 ] && ok "aucun secret detecte"
+
+# --------------------------------------------------------- 2. fichiers lourds
+max_kb=512
+big_found=0
+for file in $staged; do
+  # Les fichiers de verrouillage de dependances doivent etre versionnes et
+  # depassent legitimement la limite : les exclure evite un faux positif
+  # bloquant a chaque mise a jour des dependances.
+  case "$file" in
+    package-lock.json|*/package-lock.json|yarn.lock|*/yarn.lock|*.terraform.lock.hcl) continue ;;
+  esac
+  [ -f "$file" ] || continue
+  size_kb=$(( $(wc -c < "$file") / 1024 ))
+  if [ "$size_kb" -gt "$max_kb" ]; then
+    fail "$file pese ${size_kb} Ko (limite ${max_kb} Ko)"
+    big_found=1
+  fi
+done
+[ "$big_found" -eq 0 ] && ok "aucun fichier volumineux"
+
+# ------------------------------------------------------- 3. marqueurs de conflit
+conflict_found=0
+for file in $staged; do
+  case "$file" in */git-hooks/*) continue ;; esac
+  [ -f "$file" ] || continue
+  if git show ":$file" 2>/dev/null | grep -qE '^(<<<<<<<|>>>>>>>) '; then
+    fail "marqueur de conflit non resolu dans $file"
+    conflict_found=1
+  fi
+done
+[ "$conflict_found" -eq 0 ] && ok "aucun marqueur de conflit"
+
+# ------------------------------------------------------------- 4. Terraform fmt
+if echo "$staged" | grep -q '\.tf$'; then
+  if command -v terraform >/dev/null 2>&1; then
+    if ! terraform fmt -check -recursive infra/terraform >/dev/null 2>&1; then
+      fail "fichiers Terraform mal formates — corriger avec: terraform fmt -recursive infra/terraform"
+    else
+      ok "Terraform correctement formate"
+    fi
+  else
+    warn "terraform absent du PATH, formatage non verifie"
+  fi
+fi
+
+# --------------------------------------------------------------- 5. YAML valide
+if echo "$staged" | grep -qE '\.(yml|yaml)$'; then
+  # Sous Windows, « python3 » est souvent un raccourci vers le Microsoft Store
+  # qui echoue sans rien installer : on retient le premier interpreteur qui
+  # sait REELLEMENT importer PyYAML, plutot que le premier qui existe.
+  py=""
+  for candidate in python3 python py; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import yaml' 2>/dev/null; then
+      py="$candidate"; break
+    fi
+  done
+
+  if [ -n "$py" ]; then
+    yaml_bad=0
+    for file in $(echo "$staged" | grep -E '\.(yml|yaml)$'); do
+      # Les gabarits Jinja des roles Ansible ne sont pas du YAML pur.
+      case "$file" in *.j2) continue ;; esac
+      if ! git show ":$file" | "$py" -c 'import sys,yaml; list(yaml.safe_load_all(sys.stdin))' 2>/dev/null; then
+        fail "YAML invalide : $file"
+        yaml_bad=1
+      fi
+    done
+    [ "$yaml_bad" -eq 0 ] && ok "YAML valide"
+  else
+    warn "PyYAML absent, validation YAML ignoree"
+  fi
+fi
+
+say "─────────────────────────────────────────────────────────────"
+if [ "$errors" -gt 0 ]; then
+  printf '%sCommit refuse : %d probleme(s).%s\n' "$RED" "$errors" "$NC"
+  printf 'Contournement (a eviter) : git commit --no-verify\n'
+  exit 1
+fi
+printf '%sToutes les verifications passent.%s\n' "$GRN" "$NC"
+exit 0

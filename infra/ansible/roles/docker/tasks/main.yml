@@ -1,0 +1,70 @@
+---
+# =============================================================================
+#  Rôle docker — installe le moteur Docker CE sur les deux nœuds.
+#
+#  node-jenkins : sert à construire et pousser l'image de l'application.
+#  node-k8s     : sert de runtime à minikube (driver docker).
+#
+#  Les deux nœuds tournent en mode privilégié, ce qui autorise un démon Docker
+#  imbriqué. /var/lib/docker est monté sur un volume dédié (voir Terraform)
+#  car overlayfs ne peut pas s'empiler sur lui-même.
+# =============================================================================
+
+- name: Créer le répertoire des trousseaux apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Installer la clé GPG du dépôt Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Déclarer le dépôt Docker officiel
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+    update_cache: true
+
+- name: Installer Docker CE et ses greffons
+  ansible.builtin.apt:
+    name: "{{ docker_apt_packages }}"
+    state: present
+
+- name: Configurer le démon Docker
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "storage-driver": "overlay2",
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "features": { "buildkit": true }
+      }
+  notify: Redemarrer Docker
+
+- name: Activer et démarrer le service Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Attendre que le socket Docker réponde
+  ansible.builtin.command: docker info --format '{% raw %}{{.ServerVersion}}{% endraw %}'
+  register: docker_info
+  retries: 15
+  delay: 4
+  until: docker_info.rc == 0
+  changed_when: false
+
+- name: Afficher la version du démon Docker
+  ansible.builtin.debug:
+    msg: "Docker {{ docker_info.stdout }} opérationnel sur {{ inventory_hostname }}"

@@ -1,0 +1,14 @@
+# GENERE PAR ANSIBLE (role jenkins). Ne pas editer a la main.
+[Service]
+Environment="JENKINS_PORT={{ jenkins_port }}"
+Environment="JENKINS_HOME={{ jenkins_home }}"
+
+# -Djenkins.install.runSetupWizard=false : supprime l'assistant de premiere
+#   utilisation, incompatible avec un provisionnement automatise.
+# -Dcasc.jenkins.config : active Configuration as Code depuis jenkins.yaml.
+Environment="JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false -Dhudson.model.DownloadService.noSignatureCheck=true"
+Environment="CASC_JENKINS_CONFIG={{ jenkins_home }}/jenkins.yaml"
+
+# Jenkins telecharge ses greffons au demarrage : on laisse le temps necessaire
+# avant que systemd considere le demarrage en echec.
+TimeoutStartSec=300

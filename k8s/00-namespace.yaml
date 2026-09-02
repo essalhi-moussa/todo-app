@@ -1,0 +1,14 @@
+# =============================================================================
+#  Namespace dedie a l'application.
+#  Isole les ressources du projet du reste du cluster : les quotas, les
+#  NetworkPolicies et la suppression en masse (kubectl delete ns) s'appliquent
+#  alors a un perimetre net.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/part-of: todo-devops
+    environment: production

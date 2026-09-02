@@ -1,0 +1,94 @@
+---
+# =============================================================================
+#  Rôle nginx — serveur web / reverse proxy du nœud Kubernetes.
+#
+#  Livrable 1 du sujet : « Configure […] un serveur web (ex. NGINX ou Apache) ».
+#
+#  NGINX offre un point d'entrée HTTP stable sur le port 80 du nœud et relaie
+#  vers le Service NodePort du cluster. Sans lui il faudrait exposer la plage
+#  30000-32767 de Kubernetes, et l'URL de l'application changerait à chaque
+#  redéploiement du Service.
+# =============================================================================
+
+- name: Installer NGINX
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+
+- name: Récupérer l'adresse du nœud minikube
+  # Le NodePort n'est joignable que sur l'IP du nœud du cluster, qui est
+  # attribuée par le réseau Docker interne au démarrage de minikube.
+  ansible.builtin.command: minikube ip
+  environment:
+    MINIKUBE_HOME: /root/.minikube
+  register: minikube_node_ip
+  changed_when: false
+  failed_when: false
+
+- name: Déterminer la cible du reverse proxy
+  ansible.builtin.set_fact:
+    nginx_upstream_host: >-
+      {{ minikube_node_ip.stdout | trim
+         if (minikube_node_ip.rc == 0 and minikube_node_ip.stdout | trim | length > 0)
+         else '127.0.0.1' }}
+
+- name: Retirer le site par défaut
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Recharger NGINX
+
+- name: Déployer la configuration du site applicatif
+  # Pas d'option `validate` ici : elle exige un « %s » et lancerait
+  # « nginx -t » sur le fichier seul, or un bloc `server` hors de `http` est
+  # invalide. La configuration complète est vérifiée juste après l'activation.
+  ansible.builtin.template:
+    src: todo-app.conf.j2
+    dest: /etc/nginx/sites-available/todo-app.conf
+    mode: "0644"
+  notify: Recharger NGINX
+
+- name: Activer le site applicatif
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/todo-app.conf
+    dest: /etc/nginx/sites-enabled/todo-app.conf
+    state: link
+  notify: Recharger NGINX
+
+- name: Vérifier la configuration NGINX complète
+  # Garde-fou : un rechargement avec une configuration invalide laisserait
+  # NGINX tourner sur l'ancienne, en masquant l'erreur jusqu'au prochain
+  # redémarrage du nœud.
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Déployer la page d'attente (affichée avant le premier déploiement)
+  ansible.builtin.template:
+    src: maintenance.html.j2
+    dest: /var/www/html/maintenance.html
+    mode: "0644"
+
+- name: Activer et démarrer NGINX
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Appliquer la configuration en attente
+  ansible.builtin.meta: flush_handlers
+
+- name: Vérifier que NGINX répond
+  ansible.builtin.uri:
+    url: http://127.0.0.1/nginx-health
+    return_content: true
+  register: nginx_health
+  retries: 5
+  delay: 2
+  until: nginx_health.status is defined and nginx_health.status == 200
+
+- name: Résumer l'état du serveur web
+  ansible.builtin.debug:
+    msg: >-
+      NGINX opérationnel — relaie http://{{ nginx_upstream_host }}:{{ app_nodeport }}
+      (NodePort du cluster) vers le port 80 du nœud, publié sur
+      http://localhost:{{ nginx_public_port | default(8081) }}

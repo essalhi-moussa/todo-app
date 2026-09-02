@@ -1,0 +1,29 @@
+# =============================================================================
+#  Inventaire Ansible — GENERE PAR TERRAFORM, NE PAS EDITER A LA MAIN
+#  Source        : infra/terraform/templates/hosts.ini.tftpl
+#  Regeneration  : terraform apply
+# =============================================================================
+
+[jenkins]
+${jenkins_name} ansible_host=${jenkins_ip} jenkins_ui_port=${jenkins_ui}
+
+[kubernetes]
+${k8s_name} ansible_host=${k8s_ip} nginx_public_port=${k8s_http} postgres_public_port=${k8s_pg_port}
+
+# Le controleur Ansible lui-meme. Le declarer explicitement est necessaire :
+# le « localhost implicite » d'Ansible n'herite pas de group_vars/all.yml, et
+# la play de recapitulatif de site.yml a besoin de ces variables.
+[control]
+localhost ansible_connection=local
+
+# Groupe parent : les taches communes (paquets de base, Docker, Git)
+# s'appliquent aux deux noeuds.
+[nodes:children]
+jenkins
+kubernetes
+
+[nodes:vars]
+ansible_user=${ansible_user}
+ansible_ssh_private_key_file=${ssh_key}
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null

@@ -1,0 +1,24 @@
+# =============================================================================
+#  Exemple d'inventaire. Le fichier réellement utilisé (hosts.ini) est GÉNÉRÉ
+#  par `terraform apply` depuis l'état de l'infrastructure.
+#  Conservé ici pour documenter le format et permettre un usage manuel.
+# =============================================================================
+
+[jenkins]
+node-jenkins ansible_host=172.28.0.10 jenkins_ui_port=8080
+
+[kubernetes]
+node-k8s ansible_host=172.28.0.11 nginx_public_port=8081 postgres_public_port=5432
+
+[control]
+localhost ansible_connection=local
+
+[nodes:children]
+jenkins
+kubernetes
+
+[nodes:vars]
+ansible_user=root
+ansible_ssh_private_key_file=~/.ssh/devops_id_ed25519
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null

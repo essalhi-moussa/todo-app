@@ -1,0 +1,119 @@
+# =============================================================================
+#  Base de donnees PostgreSQL de PRODUCTION, dans le cluster.
+#  (A ne pas confondre avec l'instance d'INTEGRATION installee sur le noeud
+#  par le role Ansible postgresql.)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-postgres
+  namespace: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  # Recreate et non RollingUpdate : le volume est ReadWriteOnce, deux pods
+  # simultanes se bloqueraient mutuellement sur le montage. Kubernetes doit
+  # donc arreter l'ancien pod AVANT de creer le nouveau.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: todo-devops
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: todo-devops
+        app.kubernetes.io/component: database
+    spec:
+      securityContext:
+        # L'image officielle postgres tourne sous l'uid 999 ; on aligne le
+        # groupe du volume pour que le repertoire de donnees soit inscriptible.
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+
+          env:
+            # Les identifiants proviennent du Secret, jamais du manifeste.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: todo-db-credentials
+                  key: DB_NAME
+            # L'image refuse d'initialiser un cluster dans un repertoire non
+            # vide ; or un volume hostPath contient souvent un lost+found.
+            # On initialise donc dans un sous-repertoire.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+
+          # pg_isready teste le protocole PostgreSQL lui-meme, pas seulement
+          # l'ouverture du port TCP : la sonde ne passe au vert que quand la
+          # base accepte reellement des requetes.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "todo", "-d", "tododb", "-q"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "todo", "-d", "tododb", "-q"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: todo-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-postgres
+  namespace: todo-app
+  labels:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: database
+spec:
+  # ClusterIP : la base n'est JAMAIS exposee hors du cluster. Seuls les pods
+  # applicatifs y accedent, via le nom DNS « todo-postgres ».
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: todo-devops
+    app.kubernetes.io/component: database
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

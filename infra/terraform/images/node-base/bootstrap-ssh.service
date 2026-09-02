@@ -1,0 +1,17 @@
+[Unit]
+Description=Amorçage SSH du noeud (installation de la cle publique Ansible)
+Documentation=https://github.com/moussa/todo-devops
+# Doit s'executer AVANT sshd, sinon le premier essai de connexion Ansible
+# arrive alors qu'authorized_keys n'existe pas encore.
+Before=ssh.service
+Wants=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/bootstrap-ssh.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

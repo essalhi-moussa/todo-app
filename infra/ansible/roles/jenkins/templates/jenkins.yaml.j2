@@ -1,0 +1,50 @@
+# =============================================================================
+#  Jenkins Configuration as Code — projet {{ project_name }}
+#  GENERE PAR ANSIBLE (role jenkins). Ne pas editer a la main.
+#
+#  Decrit l'etat souhaite de l'instance Jenkins : securite, executeurs,
+#  emplacement. Rejouer le playbook restaure exactement cet etat, ce qui
+#  applique le principe d'Infrastructure as Code au serveur de CI lui-meme.
+# =============================================================================
+jenkins:
+  systemMessage: |
+    Projet DevOps & Integration Continue — deploiement automatise d'une
+    application web de gestion des taches. Instance provisionnee par Ansible.
+
+  # 2 executeurs : suffisant pour ce projet, evite de saturer le noeud.
+  numExecutors: 2
+  mode: NORMAL
+  labelString: "linux docker kubectl nodejs"
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "{{ jenkins_admin_user }}"
+          password: "{{ jenkins_admin_password }}"
+
+  # Un seul administrateur : le projet ne necessite pas de matrice de droits.
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  crumbIssuer:
+    standard:
+      excludeClientIPFromCrumb: false
+
+unclassified:
+  location:
+    url: "http://localhost:{{ jenkins_ui_port | default(jenkins_port) }}/"
+    adminAddress: "admin@todo-devops.local"
+
+  timestamper:
+    # Horodate chaque ligne de la console : indispensable pour reperer
+    # l'etape lente d'un pipeline.
+    allPipelines: true
+
+security:
+  # Le script de build tourne deja dans un environnement isole : la sandbox
+  # Groovy reste active pour les pipelines (valeur par defaut), on se contente
+  # d'autoriser la signature des methodes usuelles.
+  scriptApproval:
+    approvedSignatures: []

@@ -1,0 +1,19 @@
+# Copier en terraform.tfvars pour surcharger les valeurs par defaut.
+# Aucune valeur sensible ici : la cle privee SSH reste dans ~/.ssh sous WSL.
+
+# Reduire la memoire du noeud Kubernetes si la machine hote est limitee
+# (minikube ne demarre pas correctement en dessous de 4096 Mo).
+# k8s_node = {
+#   name           = "node-k8s"
+#   ip             = "172.28.0.11"
+#   ssh_port       = 2223
+#   http_port      = 8081
+#   postgres_port  = 5432
+#   apiserver_port = 8443
+#   memory         = 4096
+#   cpus           = 2
+# }
+
+# Sous-reseau a changer en cas de conflit avec un reseau Docker existant.
+# network_subnet  = "172.29.0.0/24"
+# network_gateway = "172.29.0.1"

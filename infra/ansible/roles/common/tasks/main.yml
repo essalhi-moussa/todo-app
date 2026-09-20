@@ -4,6 +4,19 @@
 #  Paquets de base, Git, fuseau horaire, résolution de noms inter-nœuds.
 # =============================================================================
 
+# Les nœuds téléchargent de gros paquets (OpenJDK, Jenkins, kubectl) et la
+# liaison peut être lente : les délais par défaut d'apt expirent alors en
+# plein transfert. On allonge les délais et on autorise quelques reprises.
+- name: Fiabiliser apt sur les liaisons lentes
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99-timeouts
+    mode: "0644"
+    content: |
+      Acquire::http::Timeout "120";
+      Acquire::https::Timeout "120";
+      Acquire::ftp::Timeout "120";
+      Acquire::Retries "5";
+
 - name: Rafraîchir le cache apt (au plus une fois par heure)
   ansible.builtin.apt:
     update_cache: true
@@ -57,6 +70,11 @@
     block: |
       {{ node_jenkins_ip }} node-jenkins
       {{ node_k8s_ip }} node-k8s
+    # Docker bind-monte /etc/hosts dans le conteneur : l'écriture atomique
+    # par fichier temporaire puis rename échoue avec « Device or resource
+    # busy ». unsafe_writes fait écrire le module directement dans le
+    # fichier monté.
+    unsafe_writes: true
 
 - name: Configurer Git au niveau système
   community.general.git_config:

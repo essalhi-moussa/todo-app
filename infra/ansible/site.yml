@@ -106,6 +106,18 @@
       when: kubeconfig_local.stat.exists
       notify: Redemarrer Jenkins
 
+    # Le répertoire .kube de root n'existe pas sur une image fraîche : sans
+    # cette tâche, la copie échoue sur « Destination directory /root/.kube
+    # does not exist ». Le module copy ne crée pas les dossiers parents.
+    - name: Créer le répertoire .kube de root
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: kubeconfig_local.stat.exists
+
     - name: Installer le kubeconfig pour root (diagnostic manuel)
       ansible.builtin.copy:
         src: "/tmp/{{ project_name }}-kubeconfig"

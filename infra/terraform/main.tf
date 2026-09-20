@@ -69,6 +69,18 @@ resource "docker_volume" "jenkins_home" {
   }
 }
 
+# Stockage du démon Docker interne au nœud CI. Même contrainte que pour le
+# nœud Kubernetes ci-dessous : le nœud Jenkins construit les images de
+# l'application, il lui faut donc un démon Docker fonctionnel.
+resource "docker_volume" "jenkins_docker_lib" {
+  name = "${var.project}-jenkins-docker-lib"
+
+  labels {
+    label = "project"
+    value = var.project
+  }
+}
+
 # Stockage du démon Docker interne au nœud Kubernetes. Indispensable : sans
 # volume dédié, le Docker imbriqué empilerait overlayfs sur overlayfs et
 # refuserait de démarrer.
@@ -139,6 +151,13 @@ resource "docker_container" "jenkins" {
   volumes {
     volume_name    = docker_volume.jenkins_home.name
     container_path = "/var/lib/jenkins"
+  }
+
+  # Sans ce volume, /var/lib/docker resterait sur l'overlayfs du conteneur et
+  # le démon échouerait au démarrage avec « driver not supported: overlay2 ».
+  volumes {
+    volume_name    = docker_volume.jenkins_docker_lib.name
+    container_path = "/var/lib/docker"
   }
 
   upload {

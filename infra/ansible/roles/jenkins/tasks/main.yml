@@ -2,7 +2,7 @@
 # =============================================================================
 #  Rôle jenkins — serveur d'intégration continue.
 #
-#  Installe Java 17, Jenkins LTS, les greffons du pipeline, kubectl et Node.js
+#  Installe Java 21, Jenkins LTS, les greffons du pipeline, kubectl et Node.js
 #  (nécessaires aux étapes du Jenkinsfile), puis configure l'instance de façon
 #  déclarative avec Jenkins Configuration as Code.
 #
@@ -13,16 +13,31 @@
 #  résout les dépendances hors ligne à partir du fichier .war.
 # =============================================================================
 
-- name: Installer Java 17 (prérequis Jenkins)
+# Jenkins LTS n'accepte plus Java 17 : le service s'arrête au démarrage avec
+# « Supported Java versions are: [21, 25] ». Ubuntu 24.04 fournit openjdk-21.
+- name: Installer Java 21 (prérequis Jenkins)
   ansible.builtin.apt:
-    name: openjdk-17-jdk-headless
+    name: openjdk-21-jdk-headless
     state: present
 
+# Le paquet Java 17 reste sélectionné comme JVM par défaut tant qu'il est
+# installé : on le retire pour que Jenkins démarre sur la 21.
+- name: Retirer Java 17, devenu incompatible avec Jenkins
+  ansible.builtin.apt:
+    name: openjdk-17-jdk-headless
+    state: absent
+    autoremove: true
+
+# La clé « 2023 » a expiré le 26 mars 2026 ; le dépôt est désormais signé par
+# la clé « 2026 » (7198F4B714ABFC68, valable jusqu'au 21 décembre 2028).
+# Conserver l'ancienne fait échouer apt sur « NO_PUBKEY 7198F4B714ABFC68 ».
 - name: Installer la clé GPG du dépôt Jenkins
   ansible.builtin.get_url:
-    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
     dest: /etc/apt/keyrings/jenkins.asc
     mode: "0644"
+    force: true
+    timeout: 60
 
 - name: Déclarer le dépôt Jenkins LTS
   ansible.builtin.apt_repository:

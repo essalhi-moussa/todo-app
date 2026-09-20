@@ -24,6 +24,11 @@
     url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_minor }}/deb/Release.key"
     dest: /etc/apt/keyrings/kubernetes.asc
     mode: "0644"
+    timeout: 60
+  register: k8s_key_download
+  retries: 3
+  delay: 5
+  until: k8s_key_download is succeeded
 
 - name: Déclarer le dépôt Kubernetes
   ansible.builtin.apt_repository:
@@ -44,17 +49,91 @@
     state: present
 
 # -------------------------------------------------------------------- minikube
-- name: Vérifier si minikube est déjà installé
+# Deux pièges, rencontrés l'un après l'autre sur une liaison lente :
+#
+#   1. garder « when: not stat.exists » comme garde d'idempotence accepte un
+#      binaire tronqué laissé par un transfert interrompu. minikube plantait
+#      alors en SIGSEGV à chaque appel, sans jamais être retéléchargé.
+#   2. get_url s'appuie sur urlopen, qui ne reprend pas un transfert coupé :
+#      chaque tentative repart de l'octet zéro. Sur 136 Mo à débit instable,
+#      la tâche n'aboutit jamais.
+#
+# D'où : curl avec « -C - » (reprise à l'octet atteint) et un garde-fou de
+# débit, puis mise en place du binaire seulement après vérification de la
+# somme de contrôle officielle. La comparaison d'empreintes rend la séquence
+# idempotente et auto-réparatrice.
+- name: Récupérer la somme de contrôle officielle de minikube
+  ansible.builtin.uri:
+    url: "{{ minikube_url }}.sha256"
+    return_content: true
+  register: minikube_sha
+  retries: 5
+  delay: 5
+  until: minikube_sha is succeeded
+
+- name: Relever l'empreinte du binaire minikube déjà installé
   ansible.builtin.stat:
     path: /usr/local/bin/minikube
+    checksum_algorithm: sha256
   register: minikube_binary
 
-- name: Télécharger le binaire minikube
-  ansible.builtin.get_url:
-    url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-    dest: /usr/local/bin/minikube
-    mode: "0755"
-  when: not minikube_binary.stat.exists
+- name: Installer minikube si absent ou corrompu
+  when: minikube_binary.stat.checksum | default('') != minikube_sha.content | trim
+  block:
+    - name: Télécharger le binaire minikube (curl, reprise sur coupure)
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -fL
+          - --retry
+          - "15"
+          - --retry-delay
+          - "5"
+          - --retry-all-errors
+          - --connect-timeout
+          - "30"
+          # Relance le transfert si le débit reste sous 1 ko/s pendant 2 min.
+          - --speed-limit
+          - "1024"
+          - --speed-time
+          - "120"
+          - -C
+          - "-"
+          - -o
+          - /usr/local/bin/.minikube.part
+          - "{{ minikube_url }}"
+      changed_when: true
+
+    - name: Relever l'empreinte du binaire téléchargé
+      ansible.builtin.stat:
+        path: /usr/local/bin/.minikube.part
+        checksum_algorithm: sha256
+      register: minikube_part
+
+    - name: Refuser un binaire dont la somme de contrôle ne correspond pas
+      ansible.builtin.assert:
+        that: minikube_part.stat.checksum == minikube_sha.content | trim
+        fail_msg: >-
+          Somme de contrôle invalide pour minikube — attendu
+          {{ minikube_sha.content | trim }}, obtenu
+          {{ minikube_part.stat.checksum }}. Le téléchargement est incomplet.
+
+    - name: Mettre le binaire minikube en place
+      ansible.builtin.copy:
+        src: /usr/local/bin/.minikube.part
+        dest: /usr/local/bin/minikube
+        remote_src: true
+        mode: "0755"
+
+    - name: Retirer le fichier de téléchargement temporaire
+      ansible.builtin.file:
+        path: /usr/local/bin/.minikube.part
+        state: absent
+
+- name: Vérifier que le binaire minikube est exécutable
+  ansible.builtin.command: /usr/local/bin/minikube version --short
+  register: minikube_version
+  changed_when: false
 
 - name: Charger les modules noyau requis par le réseau Kubernetes
   community.general.modprobe:
@@ -134,6 +213,60 @@
   register: addon_result
   changed_when: "'enabled' in addon_result.stdout | lower"
   failed_when: false
+
+# ------------------------------------------- exposition de l'API server
+# Avec le driver docker, minikube publie l'API server sur un port ALÉATOIRE de
+# l'hôte (32771, 33012…) et son kubeconfig pointe sur l'IP interne du nœud
+# minikube (192.168.49.2) : inaccessible depuis le nœud Jenkins.
+# --listen-address et --apiserver-port ne changent pas ce comportement, or le
+# kubeconfig distant généré plus bas annonce {{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}.
+# Sans relais, le pipeline échoue sur « connection refused ».
+- name: Déployer le relais vers l'API server du cluster
+  ansible.builtin.copy:
+    dest: /usr/local/bin/k8s-apiserver-proxy.sh
+    mode: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Relaie le port {{ kubernetes_apiserver_port }} du nœud vers l'API server
+      # de minikube. L'IP est résolue au démarrage du service : elle peut
+      # changer d'un « minikube start » à l'autre.
+      set -euo pipefail
+      export MINIKUBE_HOME=/root/.minikube
+      ip="$(minikube ip)"
+      exec socat TCP-LISTEN:{{ kubernetes_apiserver_port }},fork,reuseaddr "TCP:${ip}:8443"
+  register: proxy_script
+
+- name: Déclarer le service du relais API
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/k8s-apiserver-proxy.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Relais TCP vers l'API server du cluster minikube
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      ExecStart=/usr/local/bin/k8s-apiserver-proxy.sh
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  register: proxy_unit
+
+- name: Activer et démarrer le relais API
+  ansible.builtin.systemd:
+    name: k8s-apiserver-proxy
+    state: "{{ 'restarted' if (proxy_script is changed or proxy_unit is changed) else 'started' }}"
+    enabled: true
+    daemon_reload: true
+
+- name: Vérifier que l'API server répond sur le port du nœud
+  ansible.builtin.wait_for:
+    host: "{{ node_k8s_ip }}"
+    port: "{{ kubernetes_apiserver_port }}"
+    timeout: 60
 
 # ------------------------------------------------- kubeconfig pour l'extérieur
 - name: Récupérer l'adresse interne du nœud minikube

@@ -50,8 +50,27 @@ else
   log "Docker déjà présent — $(docker --version)"
 fi
 
+# Les nœuds du projet font tourner systemd comme PID 1, avec un démon Docker
+# imbriqué et minikube par-dessus. Sous WSL2 en cgroup v2, le pilote de cgroup
+# « systemd » de Docker échoue par intermittence sur cet empilement :
+#
+#   unable to apply cgroup configuration: error creating systemd unit
+#   `docker-<id>.scope`: got `failed`
+#
+# Les conteneurs sortent alors en code 128 et bouclent en redémarrage. Le
+# pilote « cgroupfs » crée les cgroups directement, sans solliciter systemd.
+log "configuration du pilote de cgroup Docker (cgroupfs)"
+sudo install -m 0755 -d /etc/docker
+printf '%s\n' \
+  '{' \
+  '  "exec-opts": ["native.cgroupdriver=cgroupfs"],' \
+  '  "log-driver": "json-file",' \
+  '  "log-opts": { "max-size": "10m", "max-file": "3" }' \
+  '}' | sudo tee /etc/docker/daemon.json >/dev/null
+
 log "activation du service Docker"
 sudo systemctl enable --now docker
+sudo systemctl restart docker
 sudo usermod -aG docker "$USER"
 
 # -------------------------------------------------------------------- Terraform

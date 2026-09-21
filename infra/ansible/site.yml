@@ -159,8 +159,11 @@
     - name: Afficher les points d'accès
       ansible.builtin.debug:
         msg:
+          # Les ports publiés viennent de l'inventaire généré par Terraform, et
+          # non de constantes : ils sont surchargeables dans terraform.tfvars
+          # (5432 est souvent déjà pris sur l'hôte par un PostgreSQL local).
           - "Jenkins        : http://localhost:{{ jenkins_port }}  (admin / {{ jenkins_admin_password }})"
-          - "Application    : http://localhost:8081  (NGINX -> NodePort {{ app_nodeport }})"
+          - "Application    : http://localhost:{{ hostvars['node-k8s'].nginx_public_port }}  (NGINX -> NodePort {{ app_nodeport }})"
           - "API Kubernetes : https://{{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}"
-          - "PostgreSQL     : localhost:5432  (base d'intégration {{ postgres_db }})"
+          - "PostgreSQL     : localhost:{{ hostvars['node-k8s'].postgres_public_port }}  (base d'intégration {{ postgres_db }})"
           - "Étape suivante : déployer l'application -> kubectl apply -k k8s/"

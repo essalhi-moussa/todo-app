@@ -630,6 +630,34 @@ Get-Service | Where-Object { $_.Status -eq 'Running' -and
 Arrêter le service le temps du déploiement — droits administrateur requis —
 ou demander une exception à l'équipe informatique.
 
+### Les conteneurs redémarrent en boucle sans raison apparente
+
+Symptôme : `node-jenkins` et/ou `node-k8s` basculent en `Exited (128)` toutes
+les une à deux minutes, ou pire, toute la session `wsl -d <distro>` semble se
+réinitialiser (uptime qui repart de zéro, cgroups incohérents). Le mode
+réseau `networkingMode=mirrored` de `.wslconfig` — souvent activé pour
+contourner un filtrage réseau d'entreprise — s'est révélé instable dans cet
+environnement : `dmesg` y montre des échecs répétés
+
+```
+WSL (108) ERROR: CheckConnection: connect() failed: 101
+WSL (108) ERROR: CheckConnection: getaddrinfo() failed: -5
+```
+
+suivis, après quelques dizaines de secondes, d'un arrêt forcé de toute la
+distribution :
+
+```
+WSL ERROR: InitTerminateInstanceInternal: systemctl poweroff did not
+terminate the instance ... calling reboot(RB_POWER_OFF)
+```
+
+Ce n'est pas Docker qui plante : c'est WSL qui redémarre l'instance entière,
+emportant Docker et tous les conteneurs avec elle. Repasser en mode NAT (par
+défaut, ou en commentant `networkingMode=mirrored` dans `.wslconfig`) résout
+le problème — vérifié sur plusieurs dizaines de minutes de stabilité continue
+après le changement, contre quelques dizaines de secondes avant.
+
 ### `docker: permission denied` après le bootstrap
 
 L'appartenance au groupe `docker` n'est lue qu'à l'ouverture de session.

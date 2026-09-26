@@ -571,6 +571,93 @@ kubectl -n todo-app rollout restart deployment/todo-postgres deployment/todo-app
 
 ## Dépannage
 
+### `failed to bind host port 0.0.0.0:5432: address already in use`
+
+Terraform ne peut pas publier le port du nœud Kubernetes parce qu'un service
+occupe déjà `5432` sur la machine — typiquement un PostgreSQL installé sous
+Windows. Même cause possible sur `8080` (Jenkins) ou `8081` (application).
+
+Plutôt que d'arrêter le service existant, surcharger le port publié dans
+`infra/terraform/terraform.tfvars` :
+
+```hcl
+k8s_node = {
+  name           = "node-k8s"
+  ip             = "172.28.0.11"
+  ssh_port       = 2223
+  http_port      = 8081
+  postgres_port  = 15432     # au lieu de 5432
+  apiserver_port = 8443
+  memory         = 6144
+  cpus           = 4
+}
+```
+
+Seule la publication vers l'hôte change : dans le conteneur et dans le
+cluster, PostgreSQL continue d'écouter sur `5432`. Le récapitulatif affiché
+en fin de playbook reprend le port réellement configuré.
+
+Vérifier ce qui occupe un port, depuis PowerShell :
+
+```powershell
+Get-NetTCPConnection -LocalPort 5432 -State Listen |
+  ForEach-Object { Get-Process -Id $_.OwningProcess }
+```
+
+### Aucun réseau depuis WSL alors que Windows est connecté
+
+Symptôme trompeur : le DNS résout, la table de routage est correcte, mais
+**toute connexion TCP sortante échoue** — `No route to host`, y compris vers
+la passerelle du réseau local. Les erreurs apparaissent d'abord sous forme de
+dépôts apt injoignables (`Release file no longer has a Release file`), ce qui
+oriente à tort vers Ubuntu.
+
+Cause habituelle : un agent de sécurité poste de travail (client VPN
+d'entreprise, proxy de filtrage) dont le pilote filtre le trafic du
+commutateur virtuel Hyper-V. Le mode réseau `mirrored` ne suffit pas.
+
+Diagnostic :
+
+```bash
+curl -m 10 https://download.docker.com/linux/ubuntu/gpg   # depuis WSL
+```
+
+```powershell
+Get-Service | Where-Object { $_.Status -eq 'Running' -and
+  $_.DisplayName -match 'VPN|Forcepoint|Zscaler|Netskope|Cisco' }
+```
+
+Arrêter le service le temps du déploiement — droits administrateur requis —
+ou demander une exception à l'équipe informatique.
+
+### Les conteneurs redémarrent en boucle sans raison apparente
+
+Symptôme : `node-jenkins` et/ou `node-k8s` basculent en `Exited (128)` toutes
+les une à deux minutes, ou pire, toute la session `wsl -d <distro>` semble se
+réinitialiser (uptime qui repart de zéro, cgroups incohérents). Le mode
+réseau `networkingMode=mirrored` de `.wslconfig` — souvent activé pour
+contourner un filtrage réseau d'entreprise — s'est révélé instable dans cet
+environnement : `dmesg` y montre des échecs répétés
+
+```
+WSL (108) ERROR: CheckConnection: connect() failed: 101
+WSL (108) ERROR: CheckConnection: getaddrinfo() failed: -5
+```
+
+suivis, après quelques dizaines de secondes, d'un arrêt forcé de toute la
+distribution :
+
+```
+WSL ERROR: InitTerminateInstanceInternal: systemctl poweroff did not
+terminate the instance ... calling reboot(RB_POWER_OFF)
+```
+
+Ce n'est pas Docker qui plante : c'est WSL qui redémarre l'instance entière,
+emportant Docker et tous les conteneurs avec elle. Repasser en mode NAT (par
+défaut, ou en commentant `networkingMode=mirrored` dans `.wslconfig`) résout
+le problème — vérifié sur plusieurs dizaines de minutes de stabilité continue
+après le changement, contre quelques dizaines de secondes avant.
+
 ### `docker: permission denied` après le bootstrap
 
 L'appartenance au groupe `docker` n'est lue qu'à l'ouverture de session.

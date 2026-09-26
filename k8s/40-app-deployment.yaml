@@ -53,7 +53,16 @@ spec:
             - sh
             - -c
             - |
-              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -q; do
+              # -U/-d explicites : sans eux, pg_isready tente de resoudre le
+              # nom d'utilisateur du processus en cours pour en faire les
+              # valeurs par defaut. Le pod tourne en runAsUser: 1000, or
+              # l'image postgres:16-alpine ne declare aucune entree /etc/passwd
+              # pour cet UID ("whoami: unknown uid 1000") : la resolution
+              # echouait avant meme de tenter une connexion, et pg_isready
+              # sortait en permanence avec le code 3 « no attempt » — la
+              # boucle bouclait indefiniment sans jamais pouvoir reussir,
+              # quelle que soit la disponibilite reelle de PostgreSQL.
+              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q; do
                 echo "en attente de PostgreSQL sur $DB_HOST:$DB_PORT..."
                 sleep 2
               done
@@ -61,6 +70,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: todo-app-config
+            - secretRef:
+                name: todo-db-credentials
           resources:
             requests:
               cpu: 10m

@@ -106,6 +106,18 @@
       when: kubeconfig_local.stat.exists
       notify: Redemarrer Jenkins
 
+    # Le répertoire .kube de root n'existe pas sur une image fraîche : sans
+    # cette tâche, la copie échoue sur « Destination directory /root/.kube
+    # does not exist ». Le module copy ne crée pas les dossiers parents.
+    - name: Créer le répertoire .kube de root
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: kubeconfig_local.stat.exists
+
     - name: Installer le kubeconfig pour root (diagnostic manuel)
       ansible.builtin.copy:
         src: "/tmp/{{ project_name }}-kubeconfig"
@@ -147,8 +159,11 @@
     - name: Afficher les points d'accès
       ansible.builtin.debug:
         msg:
+          # Les ports publiés viennent de l'inventaire généré par Terraform, et
+          # non de constantes : ils sont surchargeables dans terraform.tfvars
+          # (5432 est souvent déjà pris sur l'hôte par un PostgreSQL local).
           - "Jenkins        : http://localhost:{{ jenkins_port }}  (admin / {{ jenkins_admin_password }})"
-          - "Application    : http://localhost:8081  (NGINX -> NodePort {{ app_nodeport }})"
+          - "Application    : http://localhost:{{ hostvars['node-k8s'].nginx_public_port }}  (NGINX -> NodePort {{ app_nodeport }})"
           - "API Kubernetes : https://{{ node_k8s_ip }}:{{ kubernetes_apiserver_port }}"
-          - "PostgreSQL     : localhost:5432  (base d'intégration {{ postgres_db }})"
+          - "PostgreSQL     : localhost:{{ hostvars['node-k8s'].postgres_public_port }}  (base d'intégration {{ postgres_db }})"
           - "Étape suivante : déployer l'application -> kubectl apply -k k8s/"

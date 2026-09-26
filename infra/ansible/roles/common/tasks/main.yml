@@ -4,6 +4,19 @@
 #  Paquets de base, Git, fuseau horaire, résolution de noms inter-nœuds.
 # =============================================================================
 
+# Les nœuds téléchargent de gros paquets (OpenJDK, Jenkins, kubectl) et la
+# liaison peut être lente : les délais par défaut d'apt expirent alors en
+# plein transfert. On allonge les délais et on autorise quelques reprises.
+- name: Fiabiliser apt sur les liaisons lentes
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99-timeouts
+    mode: "0644"
+    content: |
+      Acquire::http::Timeout "120";
+      Acquire::https::Timeout "120";
+      Acquire::ftp::Timeout "120";
+      Acquire::Retries "5";
+
 - name: Rafraîchir le cache apt (au plus une fois par heure)
   ansible.builtin.apt:
     update_cache: true
@@ -33,21 +46,22 @@
       - python3-setuptools
     state: present
 
-- name: Définir le fuseau horaire
-  community.general.timezone:
-    name: "{{ timezone }}"
-  # Le module n'est pas indispensable au projet : si la collection
-  # community.general est absente, on retombe sur la méthode manuelle.
-  failed_when: false
-  register: timezone_module
+# Le module community.general.timezone s'appuie sur timedatectl, dont le
+# service systemd-timedated n'est pas fiable dans un nœud conteneurisé. La
+# méthode ci-dessous — les deux fichiers que lit réellement la glibc — est
+# déterministe et donne le même résultat.
+- name: Déclarer le fuseau horaire
+  ansible.builtin.copy:
+    dest: /etc/timezone
+    content: "{{ timezone }}\n"
+    mode: "0644"
 
-- name: Définir le fuseau horaire (méthode de repli)
+- name: Activer le fuseau horaire
   ansible.builtin.file:
     src: "/usr/share/zoneinfo/{{ timezone }}"
     dest: /etc/localtime
     state: link
     force: true
-  when: timezone_module is failed or timezone_module is skipped
 
 - name: Déclarer les deux nœuds dans /etc/hosts
   ansible.builtin.blockinfile:
@@ -56,6 +70,11 @@
     block: |
       {{ node_jenkins_ip }} node-jenkins
       {{ node_k8s_ip }} node-k8s
+    # Docker bind-monte /etc/hosts dans le conteneur : l'écriture atomique
+    # par fichier temporaire puis rename échoue avec « Device or resource
+    # busy ». unsafe_writes fait écrire le module directement dans le
+    # fichier monté.
+    unsafe_writes: true
 
 - name: Configurer Git au niveau système
   community.general.git_config:
@@ -63,10 +82,11 @@
     value: "{{ item.value }}"
     scope: system
   loop:
+    # safe.directory=* : sans cela Git refuse d'opérer sur un dépôt cloné par
+    # un autre utilisateur — exactement le cas d'un workspace Jenkins.
     - { name: "init.defaultBranch", value: "main" }
     - { name: "pull.rebase", value: "false" }
     - { name: "safe.directory", value: "*" }
-  failed_when: false
 
 - name: Créer le répertoire de métadonnées du projet
   ansible.builtin.file:

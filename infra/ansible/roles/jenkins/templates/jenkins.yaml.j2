@@ -28,9 +28,10 @@ jenkins:
     loggedInUsersCanDoAnything:
       allowAnonymousRead: false
 
-  crumbIssuer:
-    standard:
-      excludeClientIPFromCrumb: false
+  # DefaultCrumbIssuer n'expose plus « excludeClientIPFromCrumb » : le laisser
+  # fait échouer JCasC au démarrage avec UnknownAttributesException, et Jenkins
+  # refuse alors de s'initialiser. La protection CSRF reste active par défaut.
+  crumbIssuer: "standard"
 
 unclassified:
   location:

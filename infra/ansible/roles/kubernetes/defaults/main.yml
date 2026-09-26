@@ -2,3 +2,7 @@
 # Valeurs par defaut du role kubernetes.
 # Les variables reellement utilisees sont centralisees dans
 # infra/ansible/group_vars/all.yml pour garder une seule source de verite.
+
+# Binaire minikube : l'URL sert aussi a deriver celle de la somme de controle
+# officielle, en lui ajoutant le suffixe « .sha256 ».
+minikube_url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
